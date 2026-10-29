@@ -1,0 +1,53 @@
+# language: YAML / file: .github/workflows/build-ko.yml / runtime: GitHub Actions / target: ARM64 GKI
+name: Build CassR Kernel Module
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libelf-dev libssl-dev \
+            clang lld llvm bc git python3 file
+
+      - name: Fetch GKI kernel source
+        run: |
+          git clone --depth 1 --branch android15-6.6 \
+            https://android.googlesource.com/kernel/common kernel-src
+
+      - name: Configure GKI kernel
+        run: |
+          make -C kernel-src O="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1 gki_defconfig
+
+      - name: Build kernel symbols and modules
+        run: |
+          make -C kernel-src O="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1 \
+            -j4 Image modules
+
+      - name: Build external CassR module
+        run: |
+          make KDIR="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1
+          test -s cassr_hook.ko
+          file cassr_hook.ko
+          sha256sum cassr_hook.ko
+
+      - name: Upload kernel module
+        uses: actions/upload-artifact@v4
+        with:
+          name: cassr_hook-arm64-ko
+          path: cassr_hook.ko
+          if-no-files-found: error
+          retention-days: 30
