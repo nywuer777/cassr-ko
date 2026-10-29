@@ -1,5 +1,5 @@
-# language: YAML / file: .github/workflows/build-ko.yml / runtime: GitHub Actions / target: ARM64 GKI
-name: Build CassR Kernel Module
+# language: YAML / file: .github/workflows/build-ko.yml / runtime: GitHub Actions / target: Android15-6.6 GKI ARM64
+name: Build CassR GKI Kernel Module
 
 on:
   push:
@@ -8,6 +8,11 @@ on:
 
 permissions:
   contents: read
+
+env:
+  GKI_TAG: android15-6.6-2026-01_r34
+  GKI_COMMIT: e56cf6b09cca2151bcee244b3d334fb68685ff57
+  TARGET_UNAME: 6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k
 
 jobs:
   build:
@@ -21,33 +26,53 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libelf-dev libssl-dev \
-            clang lld llvm bc git python3 file
+            clang lld llvm bc git python3 file kmod
 
-      - name: Fetch GKI kernel source
+      - name: Fetch pinned AOSP GKI kernel source
         run: |
-          git clone --depth 1 --branch android15-6.6 \
+          git clone --depth 1 --branch "$GKI_TAG" \
             https://android.googlesource.com/kernel/common kernel-src
+          actual_commit="$(git -C kernel-src rev-parse HEAD)"
+          echo "AOSP commit: $actual_commit"
+          test "$actual_commit" = "$GKI_COMMIT"
 
-      - name: Configure GKI kernel
+      - name: Configure matching GKI family
         run: |
           make -C kernel-src O="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1 gki_defconfig
+          grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULES|CONFIG_KPROBES)=' kernel-out/.config || true
 
-      - name: Build kernel symbols and modules
+      - name: Build kernel and generate Module.symvers
         run: |
-          make -C kernel-src O="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1 \
-            -j4 Image modules
+          make -C kernel-src O="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1 -j4 Image modules
+          test -s kernel-out/Module.symvers
+          grep -w module_layout kernel-out/Module.symvers
 
       - name: Build external CassR module
         run: |
           make KDIR="$GITHUB_WORKSPACE/kernel-out" ARCH=arm64 LLVM=1
           test -s cassr_hook.ko
           file cassr_hook.ko
+          modinfo cassr_hook.ko
           sha256sum cassr_hook.ko
 
-      - name: Upload kernel module
+      - name: Record diagnostic metadata
+        run: |
+          {
+            echo "target_uname=$TARGET_UNAME"
+            echo "source_tag=$GKI_TAG"
+            echo "source_sha=$(git -C kernel-src rev-parse HEAD)"
+            echo "built_vermagic=$(modinfo -F vermagic cassr_hook.ko)"
+            echo "module_layout_crc=$(awk '$2 == "module_layout" { print $1 }' kernel-out/Module.symvers)"
+            sha256sum cassr_hook.ko
+          } > build-metadata.txt
+          cat build-metadata.txt
+
+      - name: Upload module and metadata
         uses: actions/upload-artifact@v4
         with:
-          name: cassr_hook-arm64-ko
-          path: cassr_hook.ko
+          name: cassr_hook-gki.ko
+          path: |
+            cassr_hook.ko
+            build-metadata.txt
           if-no-files-found: error
           retention-days: 30
